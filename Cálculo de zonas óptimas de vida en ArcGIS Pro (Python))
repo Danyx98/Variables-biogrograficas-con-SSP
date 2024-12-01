@@ -1,0 +1,97 @@
+import arcpy
+from arcpy.sa import *
+import os
+
+# Configuración del entorno de trabajo
+gdb_path = r"C:/Users/Dan/Escritorio/DATOS/Project/MyProject1/MyProject1.gdb" #Obligatorio cambiar
+arcpy.env.workspace = gdb_path
+arcpy.env.scratchWorkspace = gdb_path
+arcpy.env.overwriteOutput = True
+arcpy.CheckOutExtension("Spatial")
+
+# Archivos de entrada para el proceso
+shapefile_especie = r"C:/Users/Dan/Escritorio/DATOS/Pinus_sylvestris.shp" #Obligatorio cambiar
+raster_cobertura = Raster(r"C:/Users/Dan/Escritorio/DATOS/LandCover_Pinus.tif") #Obligatorio cambiar
+raster_ssp126 = Raster(r"C:/Users/Dan/Escritorio/DATOS/SSP126.tif") #Obligatorio cambiar
+
+# Reparar geometrías del shapefile
+arcpy.RepairGeometry_management(shapefile_especie)
+
+# Definir proyección por si no está definida
+desc = arcpy.Describe(shapefile_especie)
+if not desc.spatialReference.name or desc.spatialReference.name == "Unknown":
+    arcpy.DefineProjection_management(shapefile_especie, arcpy.SpatialReference(4326))
+
+# Recortar rásters según la extensión del shapefile para no procesar todos los datos
+recorte_cobertura = os.path.join(gdb_path, "recorte_cobertura")
+recorte_ssp126 = os.path.join(gdb_path, "recorte_ssp126")
+arcpy.Clip_management(raster_cobertura, "#", recorte_cobertura, shapefile_especie, "NoData", "ClippingGeometry")
+arcpy.Clip_management(raster_ssp126, "#", recorte_ssp126, shapefile_especie, "NoData", "ClippingGeometry")
+
+# Extraer las bandas necesarias del raster recorte_ssp126
+bandas_necesarias = [1, 5, 6, 12, 14]
+bandas_extraidas = []
+
+for banda_num in bandas_necesarias:
+    # Extraer cada banda como un raster individual
+    banda_raster = recorte_ssp126 + f"\\Band_{banda_num}"
+    banda_raster_path = os.path.join(gdb_path, f"banda_{banda_num}")
+    
+    # Guardar en formato compatible con FGDBR
+    arcpy.management.CopyRaster(banda_raster, banda_raster_path, pixel_type="32_BIT_FLOAT")
+    bandas_extraidas.append(banda_raster_path)
+
+# Rangos de reclasificación de las bandas según las características biológicas de la especie
+rangos_reclasificacion = {
+    "banda_1": (4, 12), #Temperatura media Anual
+    "banda_6": (-5, 1), #Temperatura mínima del mes más frío
+    "banda_5": (7, 21), #Temperatura máxima del mes más cálido
+    "banda_12": (600, 1300), #Precipitación anual en mm
+    "banda_14": (40, 80), #Precipitación del més más seco
+}
+
+# Reclasificar cada banda según los limites de la especie
+reclasificados = []
+for banda_raster_path, (banda_nombre, rango) in zip(bandas_extraidas, rangos_reclasificacion.items()):
+    banda = Raster(banda_raster_path)
+    rango_min, rango_max = rango
+
+    # Lógica IF-ELSE para reclasificación
+    reclasificado = Con((banda >= rango_min) & (banda <= rango_max), banda, 0)
+    reclasificado_path = os.path.join(gdb_path, f"r_{banda_nombre}")
+    
+    # Verificar si la ruta existe
+    if not arcpy.Exists(reclasificado_path):
+        print(f"Guardando ráster reclasificado en: {reclasificado_path}")
+        reclasificado.save(reclasificado_path)
+        reclasificados.append(reclasificado_path)
+    else:
+        print(f"El archivo {reclasificado_path} ya existe, no se guarda de nuevo.")
+
+# Verificar que los rásters fueron guardados correctamente
+if reclasificados:
+    print("Reclasificación completada. Los rásters reclasificados son:")
+    for path in reclasificados:
+        print(f"  - {path}")
+else:
+    print("No se generaron rásters reclasificados.")
+    
+# Asignar variables individuales a los rásters reclasificados para realizar cálculos
+r_banda_1 = Raster(reclasificados[0])
+r_banda_5 = Raster(reclasificados[1])
+r_banda_6 = Raster(reclasificados[2])
+r_banda_12 = Raster(reclasificados[3])
+r_banda_14 = Raster(reclasificados[4])
+
+# Sumar los rásters reclasificados
+raster_resultado = r_banda_1 + r_banda_5 + r_banda_6 + r_banda_12 + r_banda_14 + Raster(recorte_cobertura)
+
+# Guardar el resultado final
+resultado_path = os.path.join(gdb_path, "Idoneidad_Pinus")
+raster_resultado.save(resultado_path)
+
+# Verificar que el ráster fue guardado correctamente
+if arcpy.Exists(resultado_path):
+    print(f"El ráster de idoneidad fue guardado en: {resultado_path}")
+else:
+    print("No se generó el ráster de idoneidad.")
